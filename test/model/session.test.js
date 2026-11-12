@@ -62,7 +62,11 @@ async function fixture(overrides = {}, manager = store(), clock = new Clock()) {
             fake.abortController = new AbortController();
             return fake.script();
         },
-        context: () => fake.agent.transformContext([{ role: 'user', content: 'history' }], fake.abortController.signal),
+        context: messages =>
+            fake.agent.transformContext(
+                messages ?? [{ role: 'user', content: 'history' }],
+                fake.abortController.signal,
+            ),
         call: async (name, params = {}) => {
             const result = await installedTools
                 .find(tool => tool.name === name)
@@ -706,6 +710,65 @@ test('history is auto-registered before factory, late-bound to current private m
     await assert.rejects(fixture({ tools: [tool('session_history', () => {})] }), /Reserved native tool name/);
 });
 
+test('resumed long histories are compressed in the request without deleting persisted entries', async () => {
+    const f = await fixture();
+    const history = Array.from({ length: 260 }, (_, index) => ({
+        role: index % 2 ? 'assistant' : 'user',
+        content: `saved message ${index}`,
+    }));
+    history[1] = { role: 'user', content: 'Shelter location: 12,64,18.' };
+    f.fake.script = async () => {
+        const requestMessages = await f.fake.context(history);
+        assert.ok(requestMessages.length <= 26);
+        assert.ok(
+            requestMessages.some(message =>
+                String(message.content).includes('Important locations: Shelter location: 12,64,18'),
+            ),
+        );
+        assert.equal(
+            requestMessages.some(message => String(message.content).includes('saved message 0')),
+            false,
+        );
+    };
+    f.manager.getEntries().push(...history.map(message => ({ type: 'message', message })));
+    f.runner.start();
+    await f.clock.advance();
+    assert.equal(f.manager.getEntries().filter(entry => entry.type === 'message').length, 260);
+    assert.ok(f.manager.getEntries().some(entry => entry.customType === 'minecraft-context-summary-v1'));
+    await f.runner.close();
+});
+
+test('model request telemetry records provider usage only when present', async () => {
+    const requests = [];
+    const f = await fixture({
+        model: { provider: 'google', id: 'gemini-2.5-flash' },
+        onRequest: item => requests.push(item),
+    });
+    f.fake.script = async () => {
+        await f.fake.context();
+        f.fake.emit({
+            type: 'message_end',
+            message: {
+                role: 'assistant',
+                stopReason: 'stop',
+                usage: { input: 123, output: 17, cacheRead: 12 },
+            },
+        });
+    };
+    f.runner.start();
+    await f.clock.advance();
+    assert.deepEqual(requests[0], {
+        model: 'google/gemini-2.5-flash',
+        requestDurationMs: 0,
+        toolCalls: 0,
+        observations: 1,
+        inputTokens: 123,
+        outputTokens: 17,
+        cacheReadTokens: 12,
+    });
+    await f.runner.close();
+});
+
 test('cycle telemetry reports resolved wake for idle, wait and exponential error backoff', async () => {
     const outcomes = [];
     const f = await fixture({ cycleTelemetry: item => outcomes.push(item) });
@@ -1214,6 +1277,95 @@ test('a thrown provider error reaches diagnostics and the fatal hook', async () 
     await f.clock.advance();
     assert.ok(diagnostics.some(d => d.event === 'cycle_error' && /No API key/.test(d.errorMessage)));
     assert.match(fatal[0], /No API key/);
+    await f.runner.close();
+});
+
+test('Gemini input-token 429 honors Retry-After, caps retries and preserves the session', async () => {
+    const diagnostics = [];
+    const f = await fixture({
+        model: { provider: 'google', id: 'gemini-2.5-flash' },
+        maxRateLimitRetries: 2,
+        random: () => 0,
+        diagnostics: item => diagnostics.push(item),
+    });
+    f.fake.script = async () => {
+        await f.fake.context();
+        f.fake.emit({
+            type: 'message_end',
+            message: {
+                role: 'assistant',
+                stopReason: 'error',
+                errorMessage: 'HTTP 429 generate_content_free_tier_input_token_count',
+                headers: { 'retry-after': '30' },
+            },
+        });
+    };
+    f.runner.start();
+    await f.clock.advance();
+    assert.equal(f.runner.nextWakeAt, f.clock.now() + 30000);
+    assert.equal(diagnostics.at(-1).errorCategory, 'input_tokens_per_minute');
+    await f.clock.advance(29999);
+    assert.equal(f.prompts.length, 1);
+    await f.clock.advance(1);
+    assert.equal(f.prompts.length, 2);
+    await f.clock.advance(29999);
+    assert.equal(f.prompts.length, 2);
+    await f.clock.advance(1);
+    assert.equal(f.prompts.length, 3);
+    assert.equal(f.runner.paused, true);
+    await f.clock.advance(1000000);
+    assert.equal(f.prompts.length, 3);
+    assert.notEqual(f.fake.disposed, true);
+    assert.equal(diagnostics.filter(item => item.event === 'rate_limit_retry').length, 3);
+    await f.runner.close();
+});
+
+test('daily Gemini quota uses a full-day delay instead of repeatedly consuming requests', async () => {
+    const diagnostics = [];
+    const f = await fixture({ diagnostics: item => diagnostics.push(item) });
+    f.fake.script = async () => {
+        await f.fake.context();
+        f.fake.emit({
+            type: 'message_end',
+            message: {
+                role: 'assistant',
+                stopReason: 'error',
+                errorMessage: 'HTTP 429 generate_content_free_tier_requests per day',
+            },
+        });
+    };
+    f.runner.start();
+    await f.clock.advance();
+    assert.equal(f.runner.paused, false);
+    assert.equal(f.runner.nextWakeAt, f.clock.now() + 86400000);
+    assert.equal(diagnostics.at(-1).errorCategory, 'daily_quota');
+    await f.clock.advance(86399999);
+    assert.equal(f.prompts.length, 1);
+    await f.runner.close();
+});
+
+test('repeated identical failed tool arguments are blocked for one minute', async () => {
+    let actions = 0;
+    const f = await fixture({
+        tools: [
+            tool('invalid', async () => {
+                actions++;
+                return { isError: true, content: [{ type: 'text', text: 'invalid target' }] };
+            }),
+        ],
+    });
+    f.fake.script = async () => {
+        await f.fake.context();
+        await f.fake.call('invalid', { target: 'same' });
+        await assert.rejects(f.fake.call('invalid', { target: 'same' }), /already failed/);
+    };
+    f.runner.start();
+    await f.clock.advance();
+    assert.equal(actions, 1);
+    assert.equal(f.runner.nextWakeAt, f.clock.now() + 10000);
+    assert.ok(f.telemetry.some(item => item.tool === 'invalid' && item.success === false));
+    await f.clock.advance(9999);
+    assert.equal(f.prompts.length, 1);
     await f.runner.close();
 });
 

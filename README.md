@@ -109,6 +109,7 @@ More docs:
 - [Configuration](docs/configuration.md): models, auth, sandboxes, vision, where files go
 - [Tools](docs/tools.md): everything an agent can do
 - [Architecture](docs/architecture.md): how the code fits together
+- [Scout on Windows with Gemini and Aternos](docs/scout-windows.md): single-agent, hosted-inference setup
 
 ## Development
 

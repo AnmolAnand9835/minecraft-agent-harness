@@ -1,9 +1,12 @@
-import test from 'node:test';
+import nodeTest from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createWorkspaceTools } from '../../src/tools/workspace-tools.js';
+
+// These tests exercise filesystem capabilities the agent omits outside Linux.
+const test = process.platform === 'linux' ? nodeTest : nodeTest.skip;
 
 async function fixture(t, options = {}) {
     const base = await fs.mkdtemp(path.join(os.tmpdir(), 'pi-workspace-test-'));

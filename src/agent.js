@@ -492,11 +492,16 @@ export async function startAgent(settings, options = {}) {
             perStepFrames: withImages,
             whisperPlayers: !team,
         }).filter(t => !team || !['post_chat', 'read_chat'].includes(t.name));
-        let workspaceTools = await createWorkspaceTools({
-            privateRoot: path.join(root, 'workspace'),
-            sharedRoot: team ? path.join(root, 'workspace-unshared') : c.sharedRoot,
-            onWait: until => runner.requestWait(until),
-        });
+        let workspaceTools = [];
+        if (process.platform === 'linux') {
+            workspaceTools = await createWorkspaceTools({
+                privateRoot: path.join(root, 'workspace'),
+                sharedRoot: team ? path.join(root, 'workspace-unshared') : c.sharedRoot,
+                onWait: until => runner.requestWait(until),
+            });
+        } else {
+            record('workspace_tools_unavailable', { platform: process.platform });
+        }
         if (team)
             workspaceTools = workspaceTools.map(t => {
                 if (!t.parameters?.properties?.scope) return t;
@@ -654,10 +659,15 @@ export async function startAgent(settings, options = {}) {
                 record('tool', event);
                 options.onActivity?.(activityLine(event));
             },
+            onRequest: event => record('model_request', event),
             onText: text => options.onActivity?.(`"${text.replace(/\s+/g, ' ').slice(0, 300)}"`),
             onModelError: message => options.onActivity?.(`model error, will retry: ${message.slice(0, 300)}`),
             onFatal: message => void finish('model_error', { message: `Model request failed: ${message}` }),
-            cycleTelemetry: event => record('cycle', event),
+            cycleTelemetry: event =>
+                record('cycle', {
+                    model: `${model.provider ?? ''}/${model.id ?? 'unknown'}`,
+                    ...event,
+                }),
             diagnostics: event =>
                 appendFileSync(path.join(root, 'diagnostics.jsonl'), JSON.stringify({ agent: name, ...event }) + '\n', {
                     mode: 0o600,
@@ -677,7 +687,19 @@ export async function startAgent(settings, options = {}) {
         options.onSession?.(runner.sessionInfo ?? {});
         status = 'running';
         checkpoint();
-        record('ready', { tools: tools.map(t => t.name), nextWakeAt: runner.nextWakeAt });
+        record('ready', {
+            tools: tools.map(t => t.name),
+            toolCount: tools.length,
+            toolSchemaChars: JSON.stringify(
+                tools.map(({ name: toolName, description, parameters }) => ({
+                    name: toolName,
+                    description,
+                    parameters,
+                })),
+            ).length,
+            model: `${model.provider ?? ''}/${model.id ?? 'unknown'}`,
+            nextWakeAt: runner.nextWakeAt,
+        });
         const at = bot.entity?.position;
         options.onReady?.({
             tools: tools.map(t => t.name),

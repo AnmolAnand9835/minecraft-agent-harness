@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { activityLine, checkModel, connectionMessage, isFatalKick, kickText, summarizeResult } from '../src/startup.js';
 import { reconnectDelay, MAX_RECONNECTS } from '../src/cli.js';
 import { resolveConfig, toSettings } from '../src/config.js';
@@ -95,11 +96,11 @@ test('model preflight names the missing key, unknown models and unknown provider
 
 test('single agents keep their own mailbox and plan; teams share them', () => {
     const solo = toSettings(resolveConfig([{ objective: 'x', name: 'Ada' }], { env: {}, probeDocker: () => false }));
-    assert.match(solo.profile.pi.mailboxPath, /Ada\/mailbox\.sqlite$/);
-    assert.match(solo.profile.pi.planPath, /Ada\/plan\.md$/);
+    assert.ok(solo.profile.pi.mailboxPath.endsWith(path.join('Ada', 'mailbox.sqlite')));
+    assert.ok(solo.profile.pi.planPath.endsWith(path.join('Ada', 'plan.md')));
     const team = toSettings({
         ...resolveConfig([{ objective: 'x', name: 'Ada' }], { env: {}, probeDocker: () => false }),
         team: true,
     });
-    assert.match(team.profile.pi.mailboxPath, /shared\/mailbox\.sqlite$/);
+    assert.ok(team.profile.pi.mailboxPath.endsWith(path.join('shared', 'mailbox.sqlite')));
 });

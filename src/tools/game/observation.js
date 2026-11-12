@@ -3,6 +3,8 @@ import { DOORISH, doorOpen } from './guards.js';
 import { requireFunction } from './runtime.js';
 
 const position = v => v && { x: v.x, y: v.y, z: v.z };
+const HOSTILE =
+    /creeper|zombie|skeleton|spider|enderman|witch|pillager|vindicator|ravager|phantom|drowned|husk|stray|slime|silverfish|guardian|blaze|ghast|piglin|hoglin|warden|shulker|vex|cave_spider|zoglin/i;
 
 export const item = i => i && { name: i.name, count: i.count, slot: i.slot };
 
@@ -16,7 +18,7 @@ export function inventory(bot) {
 }
 
 export function createObservation({ bot, perception, world, captureFrame, mailbox }) {
-    return async ({ image = true, range = 16, block = '', signal } = {}) => {
+    return async ({ image = true, range = 12, block = '', signal } = {}) => {
         if (signal?.aborted) throw abortError('Observation cancelled');
         if (!bot.entity?.position) throw new Error('Player has not spawned.');
         if (!Number.isFinite(range) || range < 1 || range > 64) throw new Error('Observation range must be 1..64.');
@@ -24,7 +26,7 @@ export function createObservation({ bot, perception, world, captureFrame, mailbo
         const visibleEntity = requireFunction(perception, 'isEntityVisible');
         const blocks = requireFunction(world, 'getNearestBlocks')(bot, block || null, range, 128)
             .filter(b => visibleBlock(bot, b, range))
-            .slice(0, 64)
+            .slice(0, 40)
             .map(b => ({
                 name: b.name,
                 position: position(b.position),
@@ -32,9 +34,21 @@ export function createObservation({ bot, perception, world, captureFrame, mailbo
             }));
         const entities = Object.values(bot.entities)
             .filter(e => visibleEntity(bot, e, range))
-            .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))
-            .slice(0, 40)
-            .map(e => ({ id: e.id, name: e.name, username: e.username, position: position(e.position) }));
+            .sort((a, b) => {
+                const threatOrder = Number(HOSTILE.test(b.name ?? '')) - Number(HOSTILE.test(a.name ?? ''));
+                return (
+                    threatOrder ||
+                    a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position)
+                );
+            })
+            .slice(0, 16)
+            .map(e => ({
+                id: e.id,
+                name: e.name,
+                username: e.username,
+                position: position(e.position),
+                threat: HOSTILE.test(e.name ?? ''),
+            }));
         const state = {
             capturedAt: new Date().toISOString(),
             player: bot.username,

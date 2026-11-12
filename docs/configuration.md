@@ -22,6 +22,9 @@ npx minecraft-agent --config examples/agent.json --name Scout
 The harness is developed and tested against Paper 1.21.6. Any Java Edition version Mineflayer 4.33 supports should
 connect; the bundled protocol patches target 1.21.6.
 
+Offline mode does not verify a player's identity. It only works when the server is intentionally configured for
+offline-mode clients; it cannot join an online-mode server or bypass its authentication or access controls.
+
 ## Agent
 
 | Flag             | Env                      | Config key          | Default        | Notes                                                                              |
@@ -90,8 +93,11 @@ bearer token. In a config file you can also set `apiKeyHeader` (for gateways tha
 
 ### Custom providers
 
-Anything pi can describe in a `models.json` (Ollama, LM Studio, other local servers) works through `--models-file`. See
-pi's [custom provider docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/custom-provider.md).
+Anything pi can describe in a `models.json` (Ollama, LM Studio, other local servers) works through `--models-file`.
+Ollama's OpenAI-compatible Chat Completions endpoint should use `api: "openai-completions"`; `--base-url` is for
+OpenAI Responses-compatible endpoints and is not interchangeable. See pi's
+[custom model docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/models.md) and the
+[Windows Scout example](scout-windows.md).
 
 ## Sandbox
 

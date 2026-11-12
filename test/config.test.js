@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultSandbox, resolveConfig } from '../src/config.js';
+import { defaultSandbox, readConfigFile, resolveConfig } from '../src/config.js';
 
 test('default sandbox prefers e2b with a key, then docker, then local', () => {
     assert.equal(
@@ -32,4 +32,17 @@ test('unknown sandbox kinds are rejected', () => {
         () => resolveConfig([{ objective: 'x', sandbox: 'vm' }], { env: {}, probeDocker: () => false }),
         /sandbox must be one of none, local, docker, e2b/,
     );
+});
+
+test('Scout example uses Google Gemini and disables the shell sandbox', () => {
+    const raw = readConfigFile('examples/scout.json');
+    const config = resolveConfig([raw], { cwd: process.cwd(), env: {}, probeDocker: () => false });
+
+    assert.equal(config.name, 'Scout');
+    assert.equal(config.auth, 'offline');
+    assert.equal(config.minecraftVersion, 'auto');
+    assert.equal(config.sandbox.kind, 'none');
+    assert.equal(config.model.provider, 'google');
+    assert.equal(config.model.id, 'gemini-2.5-flash');
+    assert.equal(config.modelsPath, null);
 });

@@ -294,7 +294,12 @@ test('LOS observations remove hidden blocks/entities, return fresh images and ne
     const observe = createObservation({
         bot: b,
         perception: { isBlockVisible: (_, v) => v.visible, isEntityVisible: (_, v) => v.visible },
-        world: { getNearestBlocks: () => blocks },
+        world: {
+            getNearestBlocks: (_bot, _block, range) => {
+                assert.equal(range, 12);
+                return blocks;
+            },
+        },
         captureFrame: async () => ({ data: `frame-${++captures}`, mimeType: 'image/png', limitations: 'approximate' }),
         mailbox: {
             summary: () => 'DMs: 1',
@@ -316,6 +321,7 @@ test('LOS observations remove hidden blocks/entities, return fresh images and ne
         a.state.entities.map(e => e.name),
         ['zombie'],
     );
+    assert.equal(a.state.entities[0].threat, true);
     assert.ok(!JSON.stringify(a.state).includes('frame-1'));
     assert.equal(a.state.messaging, 'DMs: 1');
     await observe({ image: false });

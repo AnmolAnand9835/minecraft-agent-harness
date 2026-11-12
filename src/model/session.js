@@ -4,6 +4,12 @@ import { createSessionHistoryTool } from './session-history.js';
 import { failureCode } from '../tools/game-tools.js';
 import { findModel } from './extra-models.js';
 import { sanitizeImages, isImageRejection, redactPayloads } from './image-guard.js';
+import {
+    compactMinecraftContext,
+    CONTEXT_SUMMARY_TYPE,
+    geminiRateLimit,
+    rateLimitDelay,
+} from './context-management.js';
 
 export async function createMinecraftSession(options, dependencies = {}) {
     const runner = new MinecraftSession(options, dependencies);
@@ -289,6 +295,16 @@ const clip = (value, max) => {
     return s.length > max ? `${s.slice(0, max)}...` : s;
 };
 
+function stableJson(value) {
+    if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+    if (value && typeof value === 'object')
+        return `{${Object.keys(value)
+            .sort()
+            .map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+            .join(',')}}`;
+    return JSON.stringify(value);
+}
+
 function metric(callback, data) {
     try {
         void Promise.resolve(callback?.(data)).catch(() => {});
@@ -335,6 +351,7 @@ class MinecraftSession {
             maxQueue: 64,
             maxBackoffMs: 300000,
             idleBackoffMaxMs: 300000,
+            maxRateLimitRetries: 5,
             cacheBreakpoint: true,
             continuous: false,
             ...options,
@@ -347,6 +364,7 @@ class MinecraftSession {
             'maxToolCalls',
             'maxQueue',
             'maxBackoffMs',
+            'maxRateLimitRetries',
         ]) {
             if (!Number.isSafeInteger(this.options[name]) || this.options[name] < 1) throw new Error(`Invalid ${name}`);
         }
@@ -361,6 +379,9 @@ class MinecraftSession {
         this.active = null;
         this.work = null;
         this.sequence = 0;
+        this.rateLimitRetries = 0;
+        this.failedActions = new Map();
+        this.repeatedActionCount = 0;
     }
 
     async invokeTool(name, args, signal) {
@@ -404,11 +425,25 @@ class MinecraftSession {
                         const start = this.clock.now();
                         let success = false;
                         let code = 'unknown';
-                        let signal, errorText, resultText;
+                        let signal, errorText, resultText, actionKey;
                         try {
                             signal = args[2]
                                 ? AbortSignal.any([args[2], cycle.controller.signal])
                                 : cycle.controller.signal;
+                            actionKey = `${tool.name}:${stableJson(args[1] ?? {})}`;
+                            const priorFailure = this.failedActions.get(actionKey);
+                            if (priorFailure && priorFailure.expiresAt > this.clock.now()) {
+                                this.repeatedActionCount++;
+                                this.diagnose({
+                                    event: 'repeated_action_blocked',
+                                    tool: tool.name,
+                                    failureCode: priorFailure.code,
+                                });
+                                this.stopCycle('repeated_action');
+                                throw new Error(
+                                    'This identical action already failed; choose a different action or update its arguments.',
+                                );
+                            }
                             let result = await tool.execute(args[0], args[1], signal, args[3], args[4]);
                             success = !signal.aborted && !result?.isError;
                             resultText = textOf(result);
@@ -416,6 +451,14 @@ class MinecraftSession {
                                 code = failureCode(result, signal);
                                 errorText =
                                     result?.details?.error ?? result?.content?.find?.(c => c.type === 'text')?.text;
+                                if (!signal.aborted) {
+                                    if (this.failedActions.size >= 100)
+                                        this.failedActions.delete(this.failedActions.keys().next().value);
+                                    this.failedActions.set(actionKey, { code, expiresAt: this.clock.now() + 60000 });
+                                }
+                            } else {
+                                this.failedActions.delete(actionKey);
+                                this.repeatedActionCount = 0;
                             }
                             const note = this.options.toolResultNote?.();
                             if (note)
@@ -430,6 +473,11 @@ class MinecraftSession {
                         } catch (error) {
                             code = failureCode(error, signal);
                             errorText = error?.message ?? error;
+                            if (!signal?.aborted && actionKey) {
+                                if (this.failedActions.size >= 100)
+                                    this.failedActions.delete(this.failedActions.keys().next().value);
+                                this.failedActions.set(actionKey, { code, expiresAt: this.clock.now() + 60000 });
+                            }
                             throw error;
                         } finally {
                             cycle.inTool--;
@@ -467,6 +515,12 @@ class MinecraftSession {
             .getEntries()
             .filter(entry => entry.type === 'custom' && entry.customType === STATE_TYPE)
             .at(-1)?.data;
+        this.contextSummary =
+            this.manager
+                .getEntries()
+                .filter(entry => entry.type === 'custom' && entry.customType === CONTEXT_SUMMARY_TYPE)
+                .at(-1)?.data ?? {};
+        this.persistedContextMemory = this.contextSummary;
         if (Number.isFinite(saved?.nextWakeAt)) this.nextWakeAt = saved.nextWakeAt;
         const originalTransform = this.session.agent.transformContext?.bind(this.session.agent);
         this.session.agent.transformContext = async (messages, signal) => {
@@ -501,16 +555,40 @@ class MinecraftSession {
             }
             const previous = originalTransform ? await originalTransform(messages, signal) : messages;
             if (cycle.stop || signal?.aborted) throw stopError();
+            const objective = this.options.systemPrompt.match(/^Objective:\s*(.+)$/m)?.[1];
+            const compacted = compactMinecraftContext(previous, observation.text, {
+                previousSummary: this.contextSummary,
+                objective,
+            });
+            this.contextSummary = compacted.summary;
+            const memory = {
+                currentObjective: compacted.summary.currentObjective,
+                completedTasks: compacted.summary.completedTasks,
+                importantLocations: compacted.summary.importantLocations,
+                lastSuccessfulAction: compacted.summary.lastSuccessfulAction,
+                nextPlannedAction: compacted.summary.nextPlannedAction,
+            };
+            if (JSON.stringify(this.persistedContextMemory) !== JSON.stringify(memory)) {
+                this.manager.appendCustomEntry(CONTEXT_SUMMARY_TYPE, memory);
+                this.persistedContextMemory = memory;
+            }
+            this.diagnose({
+                event: 'context_compressed',
+                model: `${this.options.model?.provider ?? ''}/${this.options.model?.id ?? 'unknown'}`,
+                contextCharsBefore: compacted.beforeChars,
+                contextCharsAfter: compacted.afterChars,
+                recentMessages: compacted.messages.length,
+            });
             const { messages: outgoing, removed } = sanitizeImages(
                 [
-                    ...previous,
+                    ...compacted.messages,
                     {
                         role: 'user',
                         timestamp: this.clock.now(),
                         content: [
                             {
                                 type: 'text',
-                                text: `Current observation (fresh for this decision):\n${observation.text}`,
+                                text: `${compacted.summaryText}\n\nCurrent observation (fresh for this decision):\n${observation.text}`,
                             },
                             ...(observation.images ?? []),
                         ],
@@ -525,6 +603,7 @@ class MinecraftSession {
                     retry: Boolean(cycle.imagesDisabled),
                     removed,
                 });
+            cycle.modelStartedAt = this.clock.now();
             return outgoing;
         };
         const originalPayload = this.session.agent.onPayload?.bind(this.session.agent);
@@ -550,14 +629,50 @@ class MinecraftSession {
                 this.active.failed = true;
                 const errorMessage = redactPayloads(event.message.errorMessage);
                 this.active.lastErrorMessage = event.message.errorMessage;
+                const providerError = event.message.error;
+                const rateLimit = geminiRateLimit({
+                    ...(providerError && typeof providerError === 'object' ? providerError : {}),
+                    message: event.message.errorMessage ?? providerError,
+                    errorMessage: event.message.errorMessage,
+                    headers: providerError?.headers ?? event.message.headers,
+                });
+                if (rateLimit) {
+                    this.active.rateLimit = rateLimit;
+                    this.active.rateLimitErrors = (this.active.rateLimitErrors ?? 0) + 1;
+                }
                 this.diagnose({
                     event: 'model_error',
                     step: this.active.steps,
                     imageRetry: Boolean(this.active.imagesDisabled),
+                    ...(rateLimit
+                        ? {
+                              errorCategory: rateLimit.category,
+                              rateLimitErrors: this.active.rateLimitErrors,
+                          }
+                        : {}),
                     errorMessage,
                 });
                 this.active.error = { errorName: 'Error', errorCode: 'SDK_ASSISTANT_ERROR' };
                 this.reportModelError(event.message.errorMessage);
+            }
+            if (event.type === 'message_end' && event.message?.role === 'assistant') {
+                const usage = event.message.usage;
+                metric(this.options.onRequest, {
+                    model: `${this.options.model?.provider ?? ''}/${this.options.model?.id ?? 'unknown'}`,
+                    ...(Number.isFinite(this.active?.modelStartedAt)
+                        ? { requestDurationMs: this.clock.now() - this.active.modelStartedAt }
+                        : {}),
+                    toolCalls: this.active?.tools ?? 0,
+                    observations: this.active?.observations ?? 0,
+                    ...(usage && typeof usage === 'object'
+                        ? {
+                              ...(Number.isFinite(usage.input) ? { inputTokens: usage.input } : {}),
+                              ...(Number.isFinite(usage.output) ? { outputTokens: usage.output } : {}),
+                              ...(Number.isFinite(usage.cacheRead) ? { cacheReadTokens: usage.cacheRead } : {}),
+                              ...(Number.isFinite(usage.cacheWrite) ? { cacheWriteTokens: usage.cacheWrite } : {}),
+                          }
+                        : {}),
+                });
             }
         });
     }
@@ -736,6 +851,11 @@ class MinecraftSession {
                 cycle.failed = true;
                 cycle.error = safeErrorMetadata(error);
                 cycle.errorMessage = redactPayloads(String(error?.message ?? error)).slice(0, 600);
+                const rateLimit = geminiRateLimit(error);
+                if (rateLimit) {
+                    cycle.rateLimit = rateLimit;
+                    cycle.rateLimitErrors = 1;
+                }
                 this.diagnose({ event: 'cycle_error', step: cycle.steps, errorMessage: cycle.errorMessage });
                 this.reportModelError(cycle.errorMessage);
             }
@@ -746,17 +866,59 @@ class MinecraftSession {
                 this.setThinking(this.options.thinkingLevel);
             this.active = null;
             if (cycle.failed) {
-                this.failures++;
+                if (cycle.rateLimit) {
+                    this.rateLimitRetries++;
+                    const exhausted = this.rateLimitRetries > this.options.maxRateLimitRetries;
+                    const delay = rateLimitDelay({
+                        attempt: this.rateLimitRetries,
+                        retryAfterMs:
+                            cycle.rateLimit.retryAfterMs ??
+                            (cycle.rateLimit.category === 'daily_quota' ? 24 * 60 * 60 * 1000 : null),
+                        random: this.options.random ?? Math.random,
+                        maxMs: this.options.maxBackoffMs,
+                    });
+                    this.diagnose({
+                        event: 'rate_limit_retry',
+                        model: `${this.options.model?.provider ?? ''}/${this.options.model?.id ?? 'unknown'}`,
+                        errorCategory: cycle.rateLimit.category,
+                        retryCount: this.rateLimitRetries,
+                        maxRetries: this.options.maxRateLimitRetries,
+                        delayMs: delay,
+                    });
+                    if (exhausted) {
+                        this.paused = true;
+                        this.nextWakeAt = null;
+                    } else {
+                        this.failures = 0;
+                        this.nextWakeAt = this.clock.now() + Math.max(this.options.minWakeMs, delay);
+                    }
+                } else {
+                    this.rateLimitRetries = 0;
+                    this.failures++;
+                    this.nextWakeAt =
+                        this.clock.now() +
+                        Math.max(
+                            this.options.minWakeMs,
+                            Math.min(
+                                this.options.maxBackoffMs,
+                                this.options.idleMs * 2 ** Math.min(this.failures - 1, 20),
+                            ),
+                        );
+                }
+            } else if (cycle.stop === 'repeated_action') {
+                this.failures = 0;
                 this.nextWakeAt =
                     this.clock.now() +
-                    Math.max(
-                        this.options.minWakeMs,
-                        Math.min(this.options.maxBackoffMs, this.options.idleMs * 2 ** Math.min(this.failures - 1, 20)),
+                    Math.min(
+                        this.options.maxBackoffMs,
+                        this.options.idleMs * 2 ** Math.min(this.repeatedActionCount - 1, 20),
                     );
             } else if (cycle.stop === 'budget') {
+                this.rateLimitRetries = 0;
                 this.failures = 0;
                 this.nextWakeAt = this.clock.now() + this.options.minWakeMs;
             } else {
+                this.rateLimitRetries = 0;
                 this.failures = 0;
                 this.nextWakeAt ??= this.options.continuous
                     ? this.clock.now()
@@ -811,6 +973,14 @@ class MinecraftSession {
                     : {}),
                 ...(cycle.imageRetries
                     ? { imageRetry: cycle.failed ? 'failed' : 'recovered', firstError: cycle.firstError }
+                    : {}),
+                ...(cycle.rateLimit
+                    ? {
+                          model: `${this.options.model?.provider ?? ''}/${this.options.model?.id ?? 'unknown'}`,
+                          rateLimitErrors: cycle.rateLimitErrors ?? 1,
+                          retryCount: this.rateLimitRetries,
+                          errorCategory: cycle.rateLimit.category,
+                      }
                     : {}),
             });
         }

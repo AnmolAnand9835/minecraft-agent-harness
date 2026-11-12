@@ -1,0 +1,16 @@
+{
+  "host": "REPLACE_WITH_YOUR_ATERNOS_ADDRESS",
+  "port": 25565,
+  "auth": "offline",
+  "minecraftVersion": "auto",
+  "name": "Scout",
+  "gameMode": "survival",
+  "model": "google/gemini-2.5-flash",
+  "thinking": "off",
+  "objective": "Survive and make steady progress near spawn. First observe the area and inventory. Gather nearby wood, craft a crafting table and basic tools when possible, then build a small enclosed shelter with a door and light in a safe spot. Keep within about 100 blocks of spawn unless returning for safety. Avoid other players and their builds. Check health, food, and inventory before risky actions. Use the plan notes to record useful locations, resources, completed work, and the next safe task so progress can continue after a restart. Do not claim an action succeeded unless the tools confirm it.",
+  "sandbox": "none",
+  "respawn": true,
+  "reconnect": true,
+  "durationMinutes": 60,
+  "stateDir": ".agent-state"
+}
