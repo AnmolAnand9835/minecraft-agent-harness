@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
-import { dockerAvailable } from './sandbox/docker.js';
+import { dockerAvailable } from './sandbox/docker-probe.js';
 
 export const DEFAULTS = Object.freeze({
     host: 'localhost',

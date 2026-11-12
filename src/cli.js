@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { resolveConfig, readConfigFile, fromEnv, DEFAULTS } from './config.js';
 import { EXIT, checkModel } from './startup.js';
 import { extraModelIds } from './model/extra-models.js';
+import { validateScoutConfig } from './scout-config.js';
 
 const BIN = fileURLToPath(new URL('../bin/minecraft-agent.js', import.meta.url));
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -115,6 +116,28 @@ Examples
   minecraft-agent team examples/team.json
 `;
 
+const SCOUT_HELP = `scout ${pkg.version}
+Run one Minecraft survival agent with the Scout runtime.
+
+Usage
+  scout [options]
+  scout models <provider>
+
+Options
+  -c, --config <file>        JSON config file
+  -H, --host <host>          Minecraft server host
+  -p, --port <port>          Minecraft server port
+  -o, --objective <text>     what Scout should do
+  -m, --model <p/id>         provider/model-id (Gemini and DeepSeek supported)
+      --state-dir <dir>      sessions, notes and logs
+  -q, --quiet                no per-tool activity lines
+  -h, --help                 show this help
+  -v, --version              print the version
+
+Scout mode requires survival, disables vision and shell/workspace tools, and does not support team or custom-tool mode.
+Model listing reads the installed pi catalog and does not call the provider.
+`;
+
 function loadDotEnv(cwd) {
     const file = path.join(cwd, '.env');
     if (existsSync(file)) process.loadEnvFile(file);
@@ -129,7 +152,8 @@ function flagsToConfig(values) {
     return out;
 }
 
-export async function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2), { runtimeMode = 'general', entryPoint = BIN } = {}) {
+    if (!['general', 'scout'].includes(runtimeMode)) throw new Error(`Unknown runtime mode: ${runtimeMode}`);
     const cwd = process.cwd();
     loadDotEnv(cwd);
     const command = ['run', 'team', 'models'].includes(argv[0]) ? argv.shift() : 'run';
@@ -137,7 +161,8 @@ export async function main(argv = process.argv.slice(2)) {
     try {
         parsed = parseArgs({ args: argv, options: RUN_OPTIONS, allowPositionals: true, strict: true });
     } catch (e) {
-        console.error(`minecraft-agent: ${e.message}\nRun minecraft-agent --help for usage.`);
+        const commandName = runtimeMode === 'scout' ? 'scout' : 'minecraft-agent';
+        console.error(`${commandName}: ${e.message}\nRun ${commandName} --help for usage.`);
         return EXIT.usage;
     }
     const { values, positionals } = parsed;
@@ -146,31 +171,44 @@ export async function main(argv = process.argv.slice(2)) {
         return EXIT.ok;
     }
     if (values.help) {
-        console.log(HELP);
+        console.log(runtimeMode === 'scout' ? SCOUT_HELP : HELP);
         return EXIT.ok;
     }
-    if (command === 'models') return listModels(positionals[0], { all: values.all });
-    if (command === 'team') return runTeam(positionals[0] ?? values.config, cwd);
+    if (command === 'models')
+        return listModels(positionals[0], {
+            all: values.all,
+            commandName: runtimeMode === 'scout' ? 'scout' : 'minecraft-agent',
+        });
+    if (command === 'team') {
+        if (runtimeMode === 'scout') {
+            console.error('scout: team mode is not available in the Scout runtime');
+            return EXIT.usage;
+        }
+        return runTeam(positionals[0] ?? values.config, cwd);
+    }
     let config;
     try {
         const file = values.config ? readConfigFile(path.resolve(cwd, values.config)) : {};
-        config = resolveConfig([file, fromEnv(), flagsToConfig(values)], { cwd });
+        const runtimeDefaults = runtimeMode === 'scout' ? [{ sandbox: 'none' }] : [];
+        config = resolveConfig([...runtimeDefaults, file, fromEnv(), flagsToConfig(values)], { cwd });
+        if (runtimeMode === 'scout') validateScoutConfig(config);
     } catch (e) {
         if (e.code !== 'INVALID_CONFIG' && e.code !== 'ENOENT' && !(e instanceof SyntaxError)) throw e;
-        console.error(`minecraft-agent: ${e.message}\nRun minecraft-agent --help for usage.`);
+        const commandName = runtimeMode === 'scout' ? 'scout' : 'minecraft-agent';
+        console.error(`${commandName}: ${e.message}\nRun ${commandName} --help for usage.`);
         return EXIT.usage;
     }
     if (process.env.MINECRAFT_AGENT_WORKER === '1') {
         if (process.env.MINECRAFT_AGENT_DEADLINE_AT) config.deadlineAt = process.env.MINECRAFT_AGENT_DEADLINE_AT;
-        return runWorker(config);
+        return runWorker(config, { runtimeMode });
     }
     const problem = await checkModel(config);
     if (problem) {
-        console.error(`minecraft-agent: ${problem}`);
+        console.error(`${runtimeMode === 'scout' ? 'scout' : 'minecraft-agent'}: ${problem}`);
         return EXIT.error;
     }
-    if (config.reconnect === false) return runWorker(config);
-    return supervise(argv, config);
+    if (config.reconnect === false) return runWorker(config, { runtimeMode });
+    return supervise(argv, config, { entryPoint });
 }
 
 const sleep = (ms, signal) =>
@@ -185,7 +223,7 @@ export function reconnectDelay(attempt) {
 
 export const MAX_RECONNECTS = 8;
 
-async function supervise(argv, config) {
+async function supervise(argv, config, { entryPoint = BIN } = {}) {
     const say = message => process.stdout.write(`[${config.name}] ${message}\n`);
     const stop = new AbortController();
     let child = null;
@@ -199,7 +237,7 @@ async function supervise(argv, config) {
     try {
         for (;;) {
             const startedAt = Date.now();
-            child = spawn(process.execPath, [BIN, 'run', ...argv], {
+            child = spawn(process.execPath, [entryPoint, 'run', ...argv], {
                 stdio: 'inherit',
                 env: {
                     ...process.env,
@@ -232,7 +270,7 @@ async function supervise(argv, config) {
     }
 }
 
-async function runWorker(config) {
+async function runWorker(config, { runtimeMode = 'general' } = {}) {
     const { startAgent } = await import('./index.js');
     const where = `${config.host}:${config.port}`;
     const say = message => process.stdout.write(`[${config.name}] ${message}\n`);
@@ -240,6 +278,7 @@ async function runWorker(config) {
         `connecting to ${where} as ${config.name} with ${config.model.provider}/${config.model.id} (sandbox: ${config.sandbox.kind})`,
     );
     await startAgent(config, {
+        runtimeMode,
         attempt: Number(process.env.MINECRAFT_AGENT_ATTEMPT ?? 0),
         onSession: info =>
             say(
@@ -262,19 +301,19 @@ async function runWorker(config) {
     return EXIT.ok;
 }
 
-async function listModels(provider, { all = false } = {}) {
+async function listModels(provider, { all = false, commandName = 'minecraft-agent' } = {}) {
     const { ModelRuntime } = await import('@earendil-works/pi-coding-agent');
     const runtime = await ModelRuntime.create({ modelsPath: null, allowModelNetwork: false });
     const known = runtime.getProviders().map(p => p.id);
     if (provider && !known.includes(provider)) {
-        console.error(`minecraft-agent: unknown provider "${provider}". Known providers: ${known.join(', ')}`);
+        console.error(`${commandName}: unknown provider "${provider}". Known providers: ${known.join(', ')}`);
         return EXIT.error;
     }
     const withKeys = known.filter(id => runtime.hasConfiguredAuth(id));
     const providers = provider ? [provider] : all ? known : withKeys;
     if (!providers.length) {
         console.error(
-            'minecraft-agent: no provider keys found. Set one (for example OPENAI_API_KEY) in .env, or run "minecraft-agent models --all".',
+            `${commandName}: no provider keys found. Set one (for example OPENAI_API_KEY) in .env, or run "${commandName} models --all".`,
         );
         return EXIT.error;
     }

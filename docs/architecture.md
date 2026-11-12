@@ -1,23 +1,24 @@
 # Architecture
 
-Each agent runs in one Node.js process. Game tools connect a Mineflayer bot to a pi model session.
+Each agent runs in one Node.js process. The general CLI and dedicated Scout entry share the same supervisor and game
+runtime; the Scout path fixes the mode to one survival agent and leaves optional features unloaded.
 
 ```
-bin/minecraft-agent.js ── src/cli.js ── src/config.js ── src/agent.js
-                                                          │
-          ┌───────────────────────────────────────────────┼─────────────────────────────────────┐
-          ▼                                               ▼                                     ▼
-   src/body/bot.js                                 src/tools/*.js                        src/model/session.js
-   Mineflayer + pathfinder,                        tool definitions:                     pi createAgentSession,
-   collectblock, pvp; tick                         game, workspace,                      scheduler, observation
-   pacing, chat guard,                             messaging, shell,                     injection, compaction,
-   damage and respawn                              shared machine                        session_history
-          │                                               │
-          ▼                                               ▼
-   src/skills/*.js                                 src/sandbox/shell-sandbox.js
-   pathing, digging, building,                     Docker, E2B or local shell with a tool relay
-   crafting, line-of-sight perception
+bin/minecraft-agent.js ─┐
+                        ├─ src/cli.js ─ src/config.js ─ src/agent.js
+bin/scout.js ─ src/scout-cli.js ┘                         │
+                    src/scout-config.js                    ├─ src/body/ + src/skills/
+                                                           ├─ src/tools/game/ (42 tools)
+                                                           ├─ src/comms/ (chat, DMs, plan)
+                                                           ├─ src/model/session.js (Pi, context, persistence)
+                                                           └─ optional imports only when enabled:
+                                                              team, workspace, shell/sandbox, custom tools, vision
 ```
+
+`src/scout-config.js` prevents team, non-survival, vision, sandbox, flight, custom-tool, and shared-machine settings in
+Scout mode. Optional team, workspace, shell, and custom-tool modules are dynamically imported only in the general path
+that needs them. Vision was already dynamically imported. The Scout path reuses the same game tools and model session
+implementation, including resumption and telemetry.
 
 ## The loop
 

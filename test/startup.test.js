@@ -1,7 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { activityLine, checkModel, connectionMessage, isFatalKick, kickText, summarizeResult } from '../src/startup.js';
+import {
+    activityLine,
+    checkModel,
+    connectionMessage,
+    isFatalKick,
+    keyEnvFor,
+    kickText,
+    summarizeResult,
+} from '../src/startup.js';
 import { reconnectDelay, MAX_RECONNECTS } from '../src/cli.js';
 import { resolveConfig, toSettings } from '../src/config.js';
 
@@ -92,6 +100,16 @@ test('model preflight names the missing key, unknown models and unknown provider
         await checkModel({ model: { provider: 'zzz', id: 'x' } }, { sdk: fakeSdk() }),
         /Unknown provider "zzz"/,
     );
+});
+
+test('DeepSeek model preflight uses the provider key and model registry', async () => {
+    assert.equal(keyEnvFor('deepseek'), 'DEEPSEEK_API_KEY');
+    const sdk = fakeSdk({
+        providers: ['deepseek'],
+        models: { deepseek: ['deepseek-v4-flash'] },
+        auth: ['deepseek'],
+    });
+    assert.equal(await checkModel({ model: { provider: 'deepseek', id: 'deepseek-v4-flash' } }, { sdk }), null);
 });
 
 test('single agents keep their own mailbox and plan; teams share them', () => {

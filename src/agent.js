@@ -22,13 +22,6 @@ import {
     KEEP_MOVING_TOOLS,
     interruptsOnHit,
 } from './tools/game-tools.js';
-import { createWorkspaceTools } from './tools/workspace-tools.js';
-import { createDirectoryTools } from './tools/directory-tools.js';
-import { createShellTools } from './tools/shell-tools.js';
-import { loadToolsModule } from './tools/extra-tools.js';
-import { createSharedExecTool } from './tools/shared-exec.js';
-import { createE2bBackend, createLocalBackend } from './sandbox/shell-sandbox.js';
-import { createDockerBackend } from './sandbox/docker.js';
 import { createMinecraftSession } from './model/session.js';
 import { paceBot } from './body/tickpace.js';
 import { installDamageWake } from './body/damage.js';
@@ -61,6 +54,22 @@ export async function startAgent(settings, options = {}) {
     const c = validateAgentConfig(settings),
         profile = settings.profile,
         name = profile.name;
+    const runtimeMode = options.runtimeMode ?? 'general';
+    if (!['general', 'scout'].includes(runtimeMode)) throw new Error(`Unknown runtime mode: ${runtimeMode}`);
+    if (
+        runtimeMode === 'scout' &&
+        (profile.gameMode !== 'survival' ||
+            profile.team === true ||
+            profile.peers?.length ||
+            options.vision === true ||
+            options.allowFlight === true ||
+            options.toolsModule ||
+            (options.sandbox?.kind ?? 'none') !== 'none' ||
+            options.sharedMachineSocket ||
+            options.sharedMachinePath ||
+            options.sharedMachineVm !== undefined)
+    )
+        throw new Error('Scout runtime configuration enables an unsupported optional feature.');
     let shellTools = [],
         runShell = null;
     const root = c.stateRoot;
@@ -475,9 +484,16 @@ export async function startAgent(settings, options = {}) {
                 return { appended: true };
             },
         };
-        const extraTools = options.toolsModule
-            ? await loadToolsModule(options.toolsModule, { bot, name, team, options: options.toolOptions ?? {} })
-            : [];
+        let extraTools = [];
+        if (options.toolsModule) {
+            const { loadToolsModule } = await import('./tools/extra-tools.js');
+            extraTools = await loadToolsModule(options.toolsModule, {
+                bot,
+                name,
+                team,
+                options: options.toolOptions ?? {},
+            });
+        }
         const gameTools = createGameTools({
             extraTools,
             bot,
@@ -493,13 +509,14 @@ export async function startAgent(settings, options = {}) {
             whisperPlayers: !team,
         }).filter(t => !team || !['post_chat', 'read_chat'].includes(t.name));
         let workspaceTools = [];
-        if (process.platform === 'linux') {
+        if (runtimeMode !== 'scout' && process.platform === 'linux') {
+            const { createWorkspaceTools } = await import('./tools/workspace-tools.js');
             workspaceTools = await createWorkspaceTools({
                 privateRoot: path.join(root, 'workspace'),
                 sharedRoot: team ? path.join(root, 'workspace-unshared') : c.sharedRoot,
                 onWait: until => runner.requestWait(until),
             });
-        } else {
+        } else if (runtimeMode !== 'scout') {
             record('workspace_tools_unavailable', { platform: process.platform });
         }
         if (team)
@@ -536,8 +553,12 @@ export async function startAgent(settings, options = {}) {
                     };
                 }
         const tools = [...gameTools, ...workspaceTools];
-        if (team) tools.push(...createDirectoryTools({ bot, peers, self: name }));
-        if (team && options.sharedMachineSocket)
+        if (team) {
+            const { createDirectoryTools } = await import('./tools/directory-tools.js');
+            tools.push(...createDirectoryTools({ bot, peers, self: name }));
+        }
+        if (team && options.sharedMachineSocket) {
+            const { createSharedExecTool } = await import('./tools/shared-exec.js');
             tools.push(
                 createSharedExecTool({
                     socketPath: options.sharedMachineSocket,
@@ -547,33 +568,40 @@ export async function startAgent(settings, options = {}) {
                     vm: options.sharedMachineVm !== false,
                 }),
             );
+        }
         const sandbox = options.sandbox ?? { kind: 'none' };
         if (sandbox.kind !== 'none') {
-            const backend =
-                sandbox.kind === 'e2b'
-                    ? createE2bBackend({
-                          apiKey: sandbox.apiKey,
-                          template: sandbox.template || undefined,
-                          agentName: name,
-                          cohort: options.cohort,
-                          sharedDir: c.sharedRoot,
-                          privateDir: path.join(root, 'workspace', 'shell-bin'),
-                          statePath: path.join(root, 'e2b-sandbox.json'),
-                          sandboxTimeoutMs: 3 * 3600000,
-                      })
-                    : sandbox.kind === 'docker'
-                      ? createDockerBackend({
-                            agentName: name,
-                            workdir: path.join(root, 'workspace', 'shell-home'),
-                            sharedDir: c.sharedRoot,
-                            image: sandbox.image || undefined,
-                            memory: sandbox.memory || undefined,
-                            cpus: sandbox.cpus || undefined,
-                        })
-                      : createLocalBackend({
-                            workdir: path.join(root, 'workspace', 'shell-home'),
-                            sharedDir: c.sharedRoot,
-                        });
+            let backend;
+            if (sandbox.kind === 'e2b') {
+                const { createE2bBackend } = await import('./sandbox/shell-sandbox.js');
+                backend = createE2bBackend({
+                    apiKey: sandbox.apiKey,
+                    template: sandbox.template || undefined,
+                    agentName: name,
+                    cohort: options.cohort,
+                    sharedDir: c.sharedRoot,
+                    privateDir: path.join(root, 'workspace', 'shell-bin'),
+                    statePath: path.join(root, 'e2b-sandbox.json'),
+                    sandboxTimeoutMs: 3 * 3600000,
+                });
+            } else if (sandbox.kind === 'docker') {
+                const { createDockerBackend } = await import('./sandbox/docker.js');
+                backend = createDockerBackend({
+                    agentName: name,
+                    workdir: path.join(root, 'workspace', 'shell-home'),
+                    sharedDir: c.sharedRoot,
+                    image: sandbox.image || undefined,
+                    memory: sandbox.memory || undefined,
+                    cpus: sandbox.cpus || undefined,
+                });
+            } else {
+                const { createLocalBackend } = await import('./sandbox/shell-sandbox.js');
+                backend = createLocalBackend({
+                    workdir: path.join(root, 'workspace', 'shell-home'),
+                    sharedDir: c.sharedRoot,
+                });
+            }
+            const { createShellTools } = await import('./tools/shell-tools.js');
             shellTools = createShellTools({
                 backend,
                 invoke: (n, a) => runner.invokeTool(n, a),

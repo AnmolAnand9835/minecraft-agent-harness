@@ -95,6 +95,9 @@ npm start -- team examples/team.json
 Starts three agents who can message each other. [Team config](docs/multi-agent.md) has the details. For
 something with rules and a referee, look at the [Bed Wars example](examples/bedwars/README.md).
 
+For the dedicated single-agent Scout runtime, use `npm run scout -- --config examples/scout.json` or the Windows
+[Scout launcher](docs/scout-windows.md).
+
 ## Configuration
 
 Flags, environment variables (`.env` works) or a JSON file via `--config`. Flags win over env vars, env vars win over

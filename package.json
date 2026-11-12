@@ -5,7 +5,8 @@
   "private": true,
   "type": "module",
   "bin": {
-    "minecraft-agent": "bin/minecraft-agent.js"
+    "minecraft-agent": "bin/minecraft-agent.js",
+    "scout": "bin/scout.js"
   },
   "main": "src/index.js",
   "exports": {
@@ -23,6 +24,7 @@
   },
   "scripts": {
     "start": "node bin/minecraft-agent.js",
+    "scout": "node bin/scout.js",
     "postinstall": "patch-package",
     "test": "node --test \"test/**/*.test.js\"",
     "lint": "eslint .",

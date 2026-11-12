@@ -10,6 +10,16 @@
 npx minecraft-agent --config examples/agent.json --name Scout
 ```
 
+For the dedicated single-agent runtime, use the Windows launcher or run:
+
+```sh
+npm run scout -- --config examples/scout.json
+```
+
+Scout mode requires survival and rejects team, vision, shell sandbox,
+custom-tool, and shared-machine settings. It uses the same game-tool,
+chat/plan, session, and context-management code as the general runtime.
+
 ## Server
 
 | Flag           | Env          | Config key         | Default     | Notes                                                                    |
@@ -71,13 +81,14 @@ npx minecraft-agent models openai
 
 Keys come from the provider's usual environment variable:
 
-| Provider                                         | Variable                                                                                                   | Example model                                |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| Anthropic                                        | `ANTHROPIC_API_KEY`                                                                                        | `anthropic/claude-sonnet-4-6`                |
-| OpenAI                                           | `OPENAI_API_KEY`                                                                                           | `openai/gpt-6.1-terra`                       |
-| Google                                           | `GEMINI_API_KEY`                                                                                           | `google/gemini-3.1-pro-preview`              |
-| OpenRouter                                       | `OPENROUTER_API_KEY`                                                                                       | `openrouter/~anthropic/claude-sonnet-latest` |
-| Groq, Mistral, DeepSeek, xAI, Bedrock and others | see [pi providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md) |                                              |
+| Provider                               | Variable                                                                                                   | Example model                                |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| Anthropic                              | `ANTHROPIC_API_KEY`                                                                                        | `anthropic/claude-sonnet-4-6`                |
+| OpenAI                                 | `OPENAI_API_KEY`                                                                                           | `openai/gpt-6.1-terra`                       |
+| Google                                 | `GEMINI_API_KEY`                                                                                           | `google/gemini-3.1-pro-preview`              |
+| OpenRouter                             | `OPENROUTER_API_KEY`                                                                                       | `openrouter/~anthropic/claude-sonnet-latest` |
+| DeepSeek                               | `DEEPSEEK_API_KEY`                                                                                         | `deepseek/deepseek-v4-flash`                 |
+| Groq, Mistral, xAI, Bedrock and others | see [pi providers](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/providers.md) |                                              |
 
 ### OpenAI Responses compatible endpoints
 

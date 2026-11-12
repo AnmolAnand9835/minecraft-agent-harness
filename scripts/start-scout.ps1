@@ -42,11 +42,14 @@ if (-not (Test-Path (Join-Path $repoRoot 'node_modules\@earendil-works\pi-ai')))
 }
 
 $modelRef = if ($env:AGENT_MODEL) { $env:AGENT_MODEL.Trim() } else { $config.model }
-if ($modelRef -notmatch '^google/') {
-    throw "Scout is configured for Gemini. Set AGENT_MODEL=google/gemini-2.5-flash in .env or update examples\scout.json."
+$modelProvider = if ($modelRef -match '^(google|deepseek)/[^/]+$') { $Matches[1].ToLowerInvariant() } else { $null }
+if (-not $modelProvider) {
+    throw 'Scout supports google/<model-id> and deepseek/<model-id>; use AGENT_MODEL in .env or examples\scout.json.'
 }
-if ([string]::IsNullOrWhiteSpace($env:GEMINI_API_KEY)) {
-    throw 'Set GEMINI_API_KEY in .env. Keep the key private; do not paste it into chat or commit it.'
+$keyName = if ($modelProvider -eq 'google') { 'GEMINI_API_KEY' } else { 'DEEPSEEK_API_KEY' }
+$apiKey = [Environment]::GetEnvironmentVariable($keyName, 'Process')
+if ([string]::IsNullOrWhiteSpace($apiKey)) {
+    throw "Set $keyName in .env. Keep the key private; do not paste it into chat or commit it."
 }
 
 $modelCheck = @'
@@ -58,14 +61,16 @@ const config = resolveConfig(
 );
 const problem = await checkModel(config);
 if (problem) throw new Error(problem);
-if (config.model.provider !== 'google') throw new Error('Scout must use the Google Gemini provider.');
-console.log(`Gemini model configuration passed for ${config.model.id}.`);
+if (!['google', 'deepseek'].includes(config.model.provider)) {
+  throw new Error('Scout supports the Google Gemini and DeepSeek providers.');
+}
+console.log(`${config.model.provider} model configuration passed for ${config.model.id}.`);
 '@
 Push-Location $repoRoot
 try {
     & node --input-type=module -e $modelCheck
     if ($LASTEXITCODE -ne 0) {
-        throw 'Gemini model configuration check failed. Verify GEMINI_API_KEY and AGENT_MODEL in .env.'
+        throw "Model configuration check failed. Verify $keyName and AGENT_MODEL in .env."
     }
 } finally {
     Pop-Location
@@ -113,7 +118,7 @@ if (-not $serverReady) {
 
 Push-Location $repoRoot
 try {
-    npm start -- --config examples/scout.json
+    npm run scout -- --config examples/scout.json
     $agentExitCode = $LASTEXITCODE
 } finally {
     Pop-Location

@@ -1,23 +1,16 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ASSETS, cap, startPoller, waitHealthy } from './shell-sandbox.js';
+import { dockerAvailable } from './docker-probe.js';
+
+export { dockerAvailable };
 
 export const DOCKER_IMAGE = 'node:22-bookworm';
 const HOME = '/home/agent';
 const SHARED = '/opt/shared';
 const RELAY_PORT = 7777;
-
-export function dockerAvailable(bin = 'docker') {
-    try {
-        return (
-            spawnSync(bin, ['info', '--format', '{{.ServerVersion}}'], { timeout: 5000, stdio: 'ignore' }).status === 0
-        );
-    } catch {
-        return false;
-    }
-}
 
 export function containerName(agentName, workdir) {
     const slug =
